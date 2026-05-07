@@ -1,0 +1,106 @@
+This is a task-processing script that handles many pending task types: lead follow-ups, customer CRR follow-ups, quotations, PI follow-ups, sales-order-related tasks, and dispatch workflow tasks. It updates remarks, closes the current task, creates the next task where needed, and also pushes status changes back to the related Lead, Customer, Quotation, PI, Sales Order, or Dispatch record.
+
+
+// Fetch the pending task record
+get_task = Pending_Task[ID == input.Pending_Task];
+
+// Update task qty from input
+get_task.Qty = input.Qty;
+
+// If this task is linked to a one-off task, mark it completed
+if(get_task.One_off_Task != null)
+{
+	get_one = One_off_Task[ID == get_task.One_off_Task];
+	get_one.Status = "Completed";
+	get_one.Completed_Date_Time = zoho.currenttime;
+	get_one.Remarks = input.Remarks;
+}
+
+// Lead CRR Followup task handling
+if(get_task.Leads != null && get_task.Type_field1 == "Lead CRR Followup")
+{
+	// Mandatory checks
+	if(input.CRR_Followup_Mode.isEmpty())
+	{
+		openUrl("#Form:Alert?zc_Header=false&plain=<p>Followup Mode id Mandatory</p>","popup window","height=180px,width=600px");
+	}
+	else if(input.Status1.isEmpty())
+	{
+		openUrl("#Form:Alert?zc_Header=false&plain=<p>Status of Customer is Mandatory</p>","popup window","height=180px,width=600px");
+	}
+
+	// Identify who added the remarks
+	remarks_user = Users_Master[Email == zoho.loginuserid];
+	crr_lead = Leads[ID == input.CRR_Lead];
+
+	// Mark remarks as Management or User
+	if(remarks_user.Role.Role == "Sales Manager")
+	{
+		rm_person = "Management";
+	}
+	else
+	{
+		rm_person = "User";
+	}
+
+	// Close current task and store remarks
+	thisapp.Task.close_task(get_task.ID);
+	add_remarks = insert into Task_Remarks
+	[
+		Remarks = input.Remarks
+		Leads = crr_lead.ID
+		Added_User = zoho.loginuser
+		Mode = input.CRR_Followup_Mode
+		Users_Master = get_task.Users_Master
+		Date_field = zoho.currentdate
+		Remarks_Person = rm_person
+		Task_Based = true
+		Pending_Task1 = get_task.ID
+	];
+
+	// If follow-up continues, create next task
+	if(input.Status1 == "Continue Followup")
+	{
+		if(input.CRR_Next_followup_Date != null)
+		{
+			next_due_date = input.CRR_Next_followup_Date.toString("dd-MMM-yyyy") + " 18:00:00";
+		}
+		else
+		{
+			next_due_date = zoho.currenttime.addDay(3);
+		}
+
+		thisapp.Task.CRR_Task(get_task.Leads,"Lead CRR Followup",next_due_date.toDate(),crr_lead.User);
+	}
+	else if(input.Status1 == "Inquiry Received")
+	{
+		openUrl("#Form:Enquiry_Form","same window");
+	}
+	else if(input.Status1 == "Delete Customer")
+	{
+		crr_lead.Status_of_Lead = "Delete Lead";
+	}
+}
+
+// Quotation-based task handling
+if(get_task.Quotation != null)
+{
+	try
+	{
+		// Add task remarks against quotation
+		add_remarks = insert into Task_Remarks
+		[
+			Remarks = input.Remarks
+			Quotation = get_task.Quotation
+			Enquiry_Form = get_task.Quotation.Enquiry_Number
+			Added_User = zoho.loginuser
+			Users_Master = get_task.Users_Master
+			Date_field = zoho.currentdate
+			Task_Based = true
+			Pending_Task1 = get_task.ID
+		];
+	}
+	catch (e)
+	{
+	}
+}
