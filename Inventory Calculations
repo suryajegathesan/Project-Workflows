@@ -1,0 +1,82 @@
+This code recalculates one inventory record based on all related stock movements. It sums reduce/add adjustments, packed quantities, planning quantities, and general sales quantities, then updates Packed_Stock1, Un_Packed_Stock1, Account_Unpacked_Stock, and General_Sales_Qty. After that, it calls Main_Inventory() again to refresh the product-level inventory summary.
+
+
+// Fetch the inventory record for the given ID
+get_inv = Inventory[ID == id];
+
+if(get_inv.count() > 0)
+{
+	// Sum of all reduce adjustments for this inventory
+	// NOTE: Parentheses are important here because && and || are mixed
+	red_adj = Inventory_Adjustment_Splitup[
+		Inventory == get_inv.ID && Adjustment_Type == "Reduce" && (Inventory_Adjustment != null || Inventory_Adjustment_Packing_Items != null)
+	].sum(Qty);
+
+	// Sum of all add adjustments for this inventory
+	add_adj = Inventory_Adjustment_Splitup[
+		Inventory == get_inv.ID && Adjustment_Type == "Add" && (Inventory_Adjustment != null || Inventory_Adjustment_Packing_Items != null)
+	].sum(Qty);
+
+	// Fetch related product record
+	get_prod = Products_Details[ID == get_inv.ID];
+
+	// Store total net adjustment quantity
+	get_inv.Adjusted_Qty = add_adj - red_adj;
+
+	// Total packed quantity linked to this inventory
+	get_packed = Rack_Packing_Qty[
+		Inventory == get_inv.ID && (Box_Packing != null || Packing_List != null)
+	].sum(Qty);
+
+	// Get all dispatched box details for confirmed dispatches
+	get_dispatched_box = DC_Line_Items[Dispatch.Invoice_Status == "Confirmed"].Box_Details.getAll();
+
+	// Packed quantity already used in dispatched boxes
+	get_packed_used = Rack_Packing_Qty[
+		Inventory == get_inv.ID && (Packing_List == get_dispatched_box || Box_Packing.Packing_List == get_dispatched_box)
+	].sum(Qty);
+
+	// Get completed eBay packing lists
+	get_pack_ebay = Packing_List[Sales_Order.E_Bay_Order == true && Complete_Packing == true];
+
+	// Packed quantity used for eBay packing lists
+	get_packed_used1 = Rack_Packing_Qty[
+		Inventory == get_inv.ID && (Packing_List == get_pack_ebay.ID.getall() || Box_Packing.Packing_List == get_pack_ebay.ID.getall())
+	].sum(Qty);
+
+	// General sales quantity linked to this inventory
+	get_gen_sales = General_Sales_Item_Splitup[Inventory == get_inv.ID].sum(Qty);
+
+	info get_packed_used1;
+
+	// Planning rack quantity linked to this inventory
+	get_account = Planning_Rack_Splitup[
+		Inventory == get_inv.ID && Packing_Planning != null
+	].sum(Qty);
+
+	// Take the bigger value between planned qty and packed qty
+	max_un_pack = max(ifnull(get_account,0),ifnull(get_packed,0));
+
+	// Calculate final unpacked quantity
+	qtys = get_inv.Total_Qty1 - max_un_pack + add_adj - red_adj - ifnull(get_inv.Transfer_Send,0) + ifnull(get_inv.Transfer_Received,0) - get_gen_sales;
+
+	info get_packed - ifnull(get_packed_used,0) - ifnull(get_packed_used1,0);
+
+	// Update inventory stock fields
+	update Inventory[ID == get_inv.ID]
+	[
+		General_Sales_Qty = ifnull(get_gen_sales,0)
+		Packed_Stock1 = get_packed - ifnull(get_packed_used,0) - ifnull(get_packed_used1,0)
+		Un_Packed_Stock1 = get_inv.Total_Qty1 - ifnull(get_packed,0) + add_adj - red_adj - ifnull(get_inv.Transfer_Send,0) + ifnull(get_inv.Transfer_Received,0) - get_gen_sales
+		Account_Unpacked_Stock = max(0,qtys)
+	];
+
+	// Recalculate main inventory summary for the product
+	try
+	{
+		thisapp.Inventory.Main_Inventory(get_inv.Products_Details);
+	}
+	catch (e)
+	{
+	}
+}
