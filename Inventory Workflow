@@ -1,0 +1,289 @@
+This script moves approved Received stock that are QC Checked into the Inventory module after doing validation checks. It blocks the process if godown is missing, or if rack details are missing where they are required. Then it creates inventory entries item by item, handles rejected/extra/wrong quantities separately by sending them to the Return godown, recalculates inventory, updates packing calculations for packing material, updates sales percentage if the MRN is linked to a sales order, and finally closes the related pending task.
+
+
+// Check MRN items where rack is not added
+check_rack_added = MRN_Items[MRN == input.ID && Rack_Added == false];
+
+// Users who should receive inventory report/notifications
+inv_user = {"bpimpexsupervisor@gmail.com",zoho.adminuserid,"csingh@bpimpex.in"};
+
+check1 = true;
+
+// Get linked Purchase Order
+get_po = Purchase_Order[ID == input.Purchase_Order];
+
+// Check whether any MRN item is missing Godown
+all_mrn_1 = MRN_Items[MRN == input.ID && Godown_Master == null].count();
+
+// If any item does not have godown, stop the process
+if(ifnull(all_mrn_1,0) > 0)
+{
+	check1 = false;
+	openUrl("#Form:Alert?plain=Godown is not updated properly in this MRN","popup window","height=250px,width=500px");
+}
+
+// Continue only if godown validation passed
+if(check1)
+{
+	// If this MRN is linked to a Sales Order
+	if(input.Sales_Order != null)
+	{
+		get_sales = Sales_Order[ID == input.Sales_Order];
+
+		// If it is an E-Bay order, rack validation is skipped
+		if(get_sales.E_Bay_Order == true)
+		{
+			check1 = true;
+		}
+		else
+		{
+			// For normal sales orders, rack must be added for all items
+			if(check_rack_added.count() > 0)
+			{
+				check1 = false;
+				openUrl("#Form:Alert?plain=Rack not added for Some items","popup window","height=250px,width=500px");
+			}
+		}
+	}
+	else
+	{
+		// If no Sales Order is linked and PO type is Packing Material, rack validation is skipped
+		if(get_po.Type_of_Purchase == "Packing Material")
+		{
+			check1 = true;
+		}
+		else if(check_rack_added.count() > 0)
+		{
+			// For other purchases, rack must be present
+			check1 = false;
+			openUrl("#Form:Alert?plain=Rack not added for Some items","popup window","height=250px,width=500px");
+		}
+	}
+
+	// If all validations are successful, move MRN to inventory
+	if(check1 == true)
+	{
+		input.Status = "Moved to Inventory";
+		input.Moved_to_Inventory = true;
+
+		// Fetch all MRN items
+		mrn_items = MRN_Items[MRN == input.ID];
+
+		// Fetch linked sales order again for later use
+		get_sales = Sales_Order[ID == input.Sales_Order];
+
+		// Process each MRN item one by one
+		for each  each_item in mrn_items
+		{
+			// Only approved quantity is moved to inventory
+			if(each_item.Approved_Qty1 > 0)
+			{
+				// For normal purchase / non-Ebay sale, move rack-wise stock into inventory
+				if((input.Sales_Order == null && get_po.Type_of_Purchase != "Packing Material") || get_sales.E_Bay_Order == false)
+				{
+					// Get all rack entries for this MRN item
+					get_rack = Rack_Subform[MRN_Items == each_item.ID];
+
+					for each  i in get_rack
+					{
+						// Get purchase bill rate for this product
+						get_bill = Purchase_Bills_Items[MRN == input.ID && Products_Details == each_item.Products_Details && Rate_INR != null];
+
+						if(get_bill.count() > 0)
+						{
+							unit_price = get_bill.avg(Rate_INR);
+						}
+						else
+						{
+							unit_price = 0;
+						}
+
+						// Insert each rack quantity into inventory
+						insert into Inventory
+						[
+							Added_User=zoho.loginuser
+							MRN_Items=each_item.ID
+							MRN=input.ID
+							Godown=each_item.Godown_Master
+							Customer_Details=ifnull(get_sales.Client_Name,null)
+							Products_Details=each_item.Products_Details
+							Total_Qty1=i.Qty
+							Received_Qty=i.Qty
+							Un_Packed_Stock1=i.Qty
+							Total_Reserved_Qty=0
+							Account_Unpacked_Stock=i.Qty
+							Packed_Stock1=0
+							Rack_Details=i.Rack_Details
+							Report_Users=inv_user
+							Price_Per_Units=ifnull(unit_price,0)
+						]
+					}
+				}
+				else
+				{
+					// Special handling for packing material purchases
+					if(get_po.Type_of_Purchase == "Packing Material")
+					{
+						// Check if inventory already exists for this product
+						check_inv = Inventory[Products_Details == each_item.Products_Details];
+
+						if(check_inv.count() > 0)
+						{
+							// Update existing inventory quantity
+							check_inv.Total_Qty1 = check_inv.Total_Qty1 + each_item.Approved_Qty1;
+
+							// Recalculate inventory and packing logic
+							thisapp.Inventory.recalculate_inventory(check_inv.ID);
+							thisapp.Inventory.packing_recal(each_item.Products_Details);
+						}
+						else
+						{
+							// Insert new inventory record for packing material
+							insert into Inventory
+							[
+								Added_User=zoho.loginuser
+								MRN_Items=each_item.ID
+								MRN=input.ID
+								Godown=each_item.Godown_Master
+								Customer_Details=ifnull(get_sales.Client_Name,null)
+								Products_Details=each_item.Products_Details
+								Total_Qty1=each_item.Approved_Qty1
+								Received_Qty=each_item.Approved_Qty1
+								Un_Packed_Stock1=each_item.Approved_Qty1
+								Total_Reserved_Qty=0
+								Account_Unpacked_Stock=each_item.Approved_Qty1
+								Packed_Stock1=0
+								Report_Users=inv_user
+								Price_Per_Units=ifnull(each_item.Purchase_Unit_Price,0)
+							]
+
+							thisapp.Inventory.packing_recal(each_item.Products_Details);
+						}
+					}
+					else
+					{
+						// Normal direct inventory insert
+						insert into Inventory
+						[
+							Added_User=zoho.loginuser
+							MRN_Items=each_item.ID
+							MRN=input.ID
+							Godown=each_item.Godown_Master
+							Customer_Details=ifnull(get_sales.Client_Name,null)
+							Products_Details=each_item.Products_Details
+							Total_Qty1=each_item.Approved_Qty1
+							Received_Qty=each_item.Approved_Qty1
+							Un_Packed_Stock1=each_item.Approved_Qty1
+							Total_Reserved_Qty=0
+							Account_Unpacked_Stock=each_item.Approved_Qty1
+							Packed_Stock1=0
+							Report_Users=inv_user
+							Price_Per_Units=ifnull(each_item.Purchase_Unit_Price,0)
+						]
+					}
+				}
+			}
+
+			// Get Return godown for rejected/extra/wrong stock
+			get_retun_godown = Godown_Master[Godowon_Name == "Return"];
+
+			// If there is rejected quantity, move it to Return godown
+			if(each_item.Rejected_Qty1 > 0)
+			{
+				rej_rack = Rejected_Rack_Subform[MRN_Items == each_item.ID];
+
+				for each  each_rej_rack in rej_rack
+				{
+					insert into Inventory
+					[
+						Added_User=zoho.loginuser
+						MRN_Items=each_item.ID
+						MRN=each_item.MRN
+						Godown=get_retun_godown.ID
+						Customer_Details=ifnull(get_sales.Client_Name,null)
+						Products_Details=each_item.Products_Details
+						Total_Qty1=each_rej_rack.Qty
+						Received_Qty=each_rej_rack.Qty
+						Un_Packed_Stock1=each_rej_rack.Qty
+						Account_Unpacked_Stock=each_rej_rack.Qty
+						Packed_Stock1=0
+						Type_field="Rejected"
+						Rack_Details=each_rej_rack.Rack_Details
+						Report_Users=inv_user
+					]
+				}
+			}
+
+			// If there is extra quantity, move it to Return godown
+			if(each_item.Extra_Qty > 0)
+			{
+				rej_rack1 = Rejected_Rack_Subform[MRN_Items == each_item.ID];
+
+				for each  each_rej_rack1 in rej_rack1
+				{
+					insert into Inventory
+					[
+						Added_User=zoho.loginuser
+						MRN_Items=each_item.ID
+						MRN=each_item.MRN
+						Godown=get_retun_godown.ID
+						Customer_Details=ifnull(get_sales.Client_Name,null)
+						Products_Details=each_item.Products_Details
+						Total_Qty1=each_rej_rack1.Qty
+						Received_Qty=each_rej_rack1.Qty
+						Un_Packed_Stock1=each_rej_rack1.Qty
+						Account_Unpacked_Stock=each_rej_rack1.Qty
+						Packed_Stock1=0
+						Type_field="Extra"
+						Rack_Details=each_rej_rack1.Rack_Details
+						Report_Users=inv_user
+					]
+				}
+			}
+
+			// If there is wrong quantity, move it to Return godown
+			if(each_item.Wrong_Qty > 0)
+			{
+				rej_rack2 = Rejected_Rack_Subform[MRN_Items == each_item.ID];
+
+				for each  each_rej_rack2 in rej_rack2
+				{
+					insert into Inventory
+					[
+						Added_User=zoho.loginuser
+						MRN_Items=each_item.ID
+						MRN=each_item.MRN
+						Godown=get_retun_godown.ID
+						Customer_Details=ifnull(get_sales.Client_Name,null)
+						Products_Details=each_item.Products_Details
+						Total_Qty1=each_rej_rack2.Qty
+						Received_Qty=each_rej_rack2.Qty
+						Un_Packed_Stock1=each_rej_rack2.Qty
+						Account_Unpacked_Stock=rej_rack2.Qty
+						Packed_Stock1=0
+						Type_field="Wrong"
+						Rack_Details=each_rej_rack2.Rack_Details
+						Report_Users=inv_user
+					]
+				}
+			}
+
+			// Recalculate overall inventory for this product
+			thisapp.Inventory.Main_Inventory(each_item.Products_Details);
+
+			// If linked to sales order, update sales percentage calculation
+			if(get_sales.count() > 0)
+			{
+				thisapp.Sales_Order.sales_percentage_cal(get_sales.ID,each_item.Products_Details,"Inventory");
+			}
+		}
+
+		// Close the pending MRN rack entry task if it exists
+		check_task = Pending_Task[Type_field1 == "MRN Rack Entry" && Task_Status == "Pending" && MRN == input.ID];
+
+		if(check_task.count() == 1)
+		{
+			thisapp.Task.close_task(check_task.ID);
+		}
+	}
+}
